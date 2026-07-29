@@ -691,6 +691,101 @@ def cmd_sweep(args):
         sys.exit(1)
 
 
+def cmd_codex_stream(args):
+    """Stream one large Codex JSONL transcript into bounded drawers."""
+    from .codex_stream import stream_codex
+
+    palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
+    result = stream_codex(
+        args.source,
+        palace_path,
+        wing=args.wing,
+        agent=args.agent,
+        dry_run=args.dry_run,
+        max_chunks_per_file=args.max_chunks_per_file,
+        chunk_size=args.chunk_size,
+        min_chunk_size=args.min_chunk_size,
+    )
+    if result.skipped_unchanged:
+        print(
+            f"  Codex stream unchanged: {result.source_file} "
+            f"({result.chunks_planned} existing drawers)"
+        )
+        return
+    if result.skipped_max_chunks:
+        print(
+            f"  SKIP: {result.source_file} would produce {result.chunks_planned} drawers "
+            f"(limit: {args.max_chunks_per_file or 'configured default'})"
+        )
+        return
+    prefix = "  DRY RUN:" if result.dry_run else "  Codex stream:"
+    print(
+        f"{prefix} {result.source_file}\n"
+        f"    revision: {result.source_revision}\n"
+        f"    session: {result.session_id}\n"
+        f"    chunks: {result.chunks_planned}\n"
+        f"    upserted: {result.drawers_upserted}\n"
+        f"    stale revisions removed: {result.stale_drawers_removed}"
+    )
+
+
+def cmd_codex_stream_batch(args):
+    """Preflight or resume a manifest-backed Codex archive import."""
+    from .codex_stream import (
+        _batch_error_count,
+        execute_codex_batch,
+        preflight_codex_batch,
+    )
+
+    if args.preflight == args.execute:
+        print("mempalace: choose exactly one of --preflight or --execute", file=sys.stderr)
+        sys.exit(2)
+    palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
+    if args.preflight:
+        if not args.root:
+            print("mempalace: ROOT is required with --preflight", file=sys.stderr)
+            sys.exit(2)
+        if not args.report:
+            print("mempalace: --report is required with --preflight", file=sys.stderr)
+            sys.exit(2)
+        report = preflight_codex_batch(
+            args.root,
+            args.report,
+            stability_minutes=args.stability_minutes,
+            normal_max_chunks=args.max_chunks_per_file,
+            oversized_max_chunks=args.oversized_max_chunks_per_file,
+            chunk_size=args.chunk_size,
+            min_chunk_size=args.min_chunk_size,
+        )
+        print(f"  Codex batch preflight: {os.path.expanduser(args.report)}")
+    else:
+        if args.root:
+            print("mempalace: ROOT is only valid with --preflight", file=sys.stderr)
+            sys.exit(2)
+        if not args.manifest:
+            print("mempalace: --manifest is required with --execute", file=sys.stderr)
+            sys.exit(2)
+        report = execute_codex_batch(
+            args.manifest,
+            palace_path,
+            wing=args.wing,
+            agent=args.agent,
+            approve_oversized_session_ids=args.approve_oversized,
+            chunk_size=args.chunk_size,
+            min_chunk_size=args.min_chunk_size,
+        )
+        print(f"  Codex batch execution: {os.path.expanduser(args.manifest)}")
+
+    summary = report.get("summary") or {}
+    print(f"    entries: {summary.get('entries', 0)}")
+    print(f"    planned chunks: {summary.get('planned_chunks', 0)}")
+    print(f"    status counts: {summary.get('status_counts', {})}")
+    errors = _batch_error_count(report)
+    if errors:
+        print(f"  WARNING: {errors} batch entry error(s); inspect the manifest before retrying.", file=sys.stderr)
+        sys.exit(2)
+
+
 def cmd_sync(args):
     """Prune drawers whose source files are gitignored, deleted, or moved (#1252)."""
     palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
@@ -1886,6 +1981,143 @@ def main():
         help="A .jsonl transcript file, or a directory to scan recursively",
     )
 
+    # codex-stream
+    p_codex_stream = sub.add_parser(
+        "codex-stream",
+        help="Stream one Codex JSONL session without whole-file buffering",
+    )
+    p_codex_stream.add_argument("source", help="One Codex JSONL transcript file")
+    p_codex_stream.add_argument(
+        "--backend",
+        default=None,
+        help="Storage backend to use (default: config/env/detected/chroma)",
+    )
+    p_codex_stream.add_argument(
+        "--wing",
+        default="codex_stream",
+        help="Wing for the derived drawers (default: codex_stream)",
+    )
+    p_codex_stream.add_argument(
+        "--agent",
+        default="mempalace",
+        help="Agent name recorded on every drawer (default: mempalace)",
+    )
+    p_codex_stream.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Fingerprint and count chunks without writing drawers or state",
+    )
+    p_codex_stream.add_argument(
+        "--max-chunks-per-file",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Safety cap for one transcript (default: 50000 or "
+            "MEMPALACE_MAX_CHUNKS_PER_FILE; 0 disables the cap)"
+        ),
+    )
+    p_codex_stream.add_argument(
+        "--chunk-size",
+        type=int,
+        default=800,
+        metavar="N",
+        help="Maximum characters per derived drawer (default: 800)",
+    )
+    p_codex_stream.add_argument(
+        "--min-chunk-size",
+        type=int,
+        default=30,
+        metavar="N",
+        help="Discard chunks at or below this size (default: 30)",
+    )
+
+    # codex-stream-batch
+    p_codex_batch = sub.add_parser(
+        "codex-stream-batch",
+        help="Preflight or resume a manifest-backed Codex archive import",
+    )
+    p_codex_batch.add_argument(
+        "root",
+        nargs="?",
+        help="Raw Codex JSONL root (required with --preflight)",
+    )
+    p_codex_batch.add_argument(
+        "--preflight",
+        action="store_true",
+        help="Create a no-write source manifest; requires ROOT and --report",
+    )
+    p_codex_batch.add_argument(
+        "--execute",
+        action="store_true",
+        help="Resume an existing manifest; requires --manifest",
+    )
+    p_codex_batch.add_argument(
+        "--report",
+        help="New manifest path for --preflight (refuses to overwrite)",
+    )
+    p_codex_batch.add_argument(
+        "--manifest",
+        help="Existing manifest path for --execute",
+    )
+    p_codex_batch.add_argument(
+        "--stability-minutes",
+        type=int,
+        default=60,
+        metavar="N",
+        help="Skip sources modified within N minutes during preflight (default: 60)",
+    )
+    p_codex_batch.add_argument(
+        "--max-chunks-per-file",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Normal per-session cap (default: 50000 or MEMPALACE_MAX_CHUNKS_PER_FILE)",
+    )
+    p_codex_batch.add_argument(
+        "--oversized-max-chunks-per-file",
+        type=int,
+        default=125_000,
+        metavar="N",
+        help="Hard cap for explicitly approved oversized sessions (default: 125000)",
+    )
+    p_codex_batch.add_argument(
+        "--approve-oversized",
+        action="append",
+        default=[],
+        metavar="SESSION_ID",
+        help="Session ID approved to exceed the normal cap (repeatable, --execute only)",
+    )
+    p_codex_batch.add_argument(
+        "--backend",
+        default=None,
+        help="Storage backend to use (default: config/env/detected/qdrant)",
+    )
+    p_codex_batch.add_argument(
+        "--wing",
+        default="codex_archive",
+        help="Wing for derived archive drawers (default: codex_archive)",
+    )
+    p_codex_batch.add_argument(
+        "--agent",
+        default="mempalace",
+        help="Agent name recorded on every drawer (default: mempalace)",
+    )
+    p_codex_batch.add_argument(
+        "--chunk-size",
+        type=int,
+        default=800,
+        metavar="N",
+        help="Maximum characters per derived drawer (default: 800)",
+    )
+    p_codex_batch.add_argument(
+        "--min-chunk-size",
+        type=int,
+        default=30,
+        metavar="N",
+        help="Discard chunks at or below this size (default: 30)",
+    )
+
     # sync
     p_sync = sub.add_parser(
         "sync",
@@ -2268,6 +2500,8 @@ def main():
         "split": cmd_split,
         "search": cmd_search,
         "sweep": cmd_sweep,
+        "codex-stream": cmd_codex_stream,
+        "codex-stream-batch": cmd_codex_stream_batch,
         "sync": cmd_sync,
         "mcp": cmd_mcp,
         "serve": cmd_serve,
