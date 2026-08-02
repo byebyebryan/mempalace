@@ -149,6 +149,28 @@ def test_stream_uses_logical_source_id_for_stable_provenance(tmp_path, monkeypat
     assert str(source.resolve()) not in state["sources"]
 
 
+def test_stream_reimports_when_the_index_schema_state_advances(tmp_path, monkeypatch):
+    source = tmp_path / "session.jsonl"
+    palace = tmp_path / "palace"
+    write_codex(source)
+    collection = FakeCollection()
+    monkeypatch.setattr(codex_stream, "get_collection", lambda *_args, **_kwargs: collection)
+
+    first = codex_stream.stream_codex(str(source), str(palace), chunk_size=50, min_chunk_size=0)
+    assert first.drawers_upserted > 0
+
+    state_path = palace / ".mempalace" / "codex-stream-state.json"
+    state = json.loads(state_path.read_text())
+    state["version"] = codex_stream.STATE_VERSION - 1
+    state_path.write_text(json.dumps(state))
+
+    refreshed = codex_stream.stream_codex(
+        str(source), str(palace), chunk_size=50, min_chunk_size=0
+    )
+    assert refreshed.drawers_upserted == first.drawers_upserted
+    assert not refreshed.skipped_unchanged
+
+
 def test_stream_dry_run_and_chunk_cap_do_not_write_state_or_drawers(tmp_path, monkeypatch):
     source = tmp_path / "session.jsonl"
     palace = tmp_path / "palace"

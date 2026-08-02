@@ -27,11 +27,12 @@ from .entities import entities_metadata
 from .palace import get_collection, mine_lock
 
 
-# Version 2 adds the source session's workspace both as drawer provenance and
-# as a compact index label.  A state bump deliberately makes prior streamed
-# sources eligible for a safe deterministic re-upsert, so existing archives
-# gain the context rather than being incorrectly treated as current.
-STATE_VERSION = 2
+# Version 3 adds the source session's workspace both as drawer provenance and
+# as a compact index label.  Version 2 was published before the migration was
+# exercised against an archive, so bump once more to make its state entries
+# eligible for a safe deterministic re-upsert. Existing archives therefore
+# gain the context instead of being incorrectly treated as current.
+STATE_VERSION = 3
 DEFAULT_MAX_CHUNKS_PER_FILE = 50_000
 DRAWER_UPSERT_BATCH_SIZE = 256
 INGEST_MODE = "codex_stream"
