@@ -27,7 +27,11 @@ from .entities import entities_metadata
 from .palace import get_collection, mine_lock
 
 
-STATE_VERSION = 1
+# Version 2 adds the source session's workspace both as drawer provenance and
+# as a compact index label.  A state bump deliberately makes prior streamed
+# sources eligible for a safe deterministic re-upsert, so existing archives
+# gain the context rather than being incorrectly treated as current.
+STATE_VERSION = 2
 DEFAULT_MAX_CHUNKS_PER_FILE = 50_000
 DRAWER_UPSERT_BATCH_SIZE = 256
 INGEST_MODE = "codex_stream"
@@ -56,6 +60,7 @@ class StreamResult:
     source_size: int
     source_revision: Optional[str]
     session_id: Optional[str]
+    session_cwd: Optional[str]
     chunks_planned: int
     drawers_upserted: int
     stale_drawers_removed: int
@@ -74,6 +79,7 @@ class CodexSourcePlan:
     source_mtime: float
     source_revision: str
     session_id: str
+    session_cwd: Optional[str]
     chunks_planned: int
 
 
@@ -157,8 +163,8 @@ def _fingerprint(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _session_id(path: Path) -> Optional[str]:
-    """Read the Codex session ID without retaining the transcript."""
+def _session_metadata(path: Path) -> tuple[Optional[str], Optional[str]]:
+    """Read stable Codex session provenance without retaining the transcript."""
     with path.open("rb") as handle:
         for raw_line in handle:
             try:
@@ -168,10 +174,36 @@ def _session_id(path: Path) -> Optional[str]:
             if not isinstance(entry, dict) or entry.get("type") != "session_meta":
                 continue
             payload = entry.get("payload")
-            if isinstance(payload, dict) and isinstance(payload.get("id"), str):
-                return payload["id"]
-            return None
-    return None
+            if not isinstance(payload, dict):
+                return None, None
+            session_id = payload.get("id")
+            if not isinstance(session_id, str):
+                return None, None
+            session_cwd = payload.get("cwd")
+            if isinstance(session_cwd, str):
+                session_cwd = session_cwd.strip() or None
+            else:
+                session_cwd = None
+            return session_id, session_cwd
+    return None, None
+
+
+def _session_id(path: Path) -> Optional[str]:
+    """Compatibility wrapper for callers that need only the session ID."""
+    return _session_metadata(path)[0]
+
+
+def _indexed_content(content: str, session_cwd: Optional[str]) -> str:
+    """Add compact workspace context without changing raw transcript provenance.
+
+    Codex stores its working directory only in ``session_meta``.  That record
+    is not an exchange chunk, so without this label project-name queries have
+    no searchable connection to the session.  The source JSONL and the
+    ``line_start``/``line_end`` metadata remain the canonical verbatim source.
+    """
+    if not session_cwd:
+        return content
+    return f"[Codex workspace: {session_cwd}]\n{content}"
 
 
 def iter_codex_turns(path: Path) -> Iterator[CodexTurn]:
@@ -286,7 +318,7 @@ def preflight_codex(source: str, *, chunk_size: int = 800, min_chunk_size: int =
     path = _source_path(source)
     source_file = str(path)
     source_size, source_mtime_ns, source_mtime = _source_stat(path)
-    session_id = _session_id(path)
+    session_id, session_cwd = _session_metadata(path)
     if session_id is None:
         raise ValueError(f"Codex session metadata is missing from {source_file}")
     source_revision = _fingerprint(path)
@@ -307,6 +339,7 @@ def preflight_codex(source: str, *, chunk_size: int = 800, min_chunk_size: int =
         source_mtime=source_mtime,
         source_revision=source_revision,
         session_id=session_id,
+        session_cwd=session_cwd,
         chunks_planned=chunks_planned,
     )
 
@@ -353,6 +386,7 @@ def _upsert_revision(
     source_mtime: float,
     source_size: int,
     session_id: Optional[str],
+    session_cwd: Optional[str],
     wing: str,
     agent: str,
     chunks: Iterator[StreamChunk],
@@ -376,27 +410,28 @@ def _upsert_revision(
     for chunk in chunks:
         room = detect_convo_room(chunk.content)
         batch_ids.append(_drawer_id(source_file, source_revision, chunk.chunk_index))
-        batch_docs.append(chunk.content)
-        batch_metas.append(
-            {
-                "wing": wing,
-                "room": room,
-                "hall": _detect_hall_cached(chunk.content),
-                "entities": entities_metadata(chunk.content),
-                "source_file": source_file,
-                "source_revision": source_revision,
-                "source_mtime": source_mtime,
-                "source_size": source_size,
-                "session_id": session_id or "unknown",
-                "chunk_index": chunk.chunk_index,
-                "line_start": chunk.line_start,
-                "line_end": chunk.line_end,
-                "authored_at": chunk.authored_at or filed_at,
-                "added_by": agent,
-                "filed_at": filed_at,
-                "ingest_mode": INGEST_MODE,
-            }
-        )
+        batch_docs.append(_indexed_content(chunk.content, session_cwd))
+        metadata = {
+            "wing": wing,
+            "room": room,
+            "hall": _detect_hall_cached(chunk.content),
+            "entities": entities_metadata(chunk.content),
+            "source_file": source_file,
+            "source_revision": source_revision,
+            "source_mtime": source_mtime,
+            "source_size": source_size,
+            "session_id": session_id or "unknown",
+            "chunk_index": chunk.chunk_index,
+            "line_start": chunk.line_start,
+            "line_end": chunk.line_end,
+            "authored_at": chunk.authored_at or filed_at,
+            "added_by": agent,
+            "filed_at": filed_at,
+            "ingest_mode": INGEST_MODE,
+        }
+        if session_cwd:
+            metadata["session_cwd"] = session_cwd
+        batch_metas.append(metadata)
         if len(batch_ids) >= DRAWER_UPSERT_BATCH_SIZE:
             flush()
     flush()
@@ -426,6 +461,7 @@ def stream_codex(
             source_size=source_size,
             source_revision=existing.get("revision"),
             session_id=existing.get("session_id"),
+            session_cwd=existing.get("session_cwd"),
             chunks_planned=existing.get("chunks", 0),
             drawers_upserted=0,
             stale_drawers_removed=0,
@@ -442,6 +478,7 @@ def stream_codex(
     source_mtime_ns = plan.source_mtime_ns
     source_mtime = plan.source_mtime
     session_id = plan.session_id
+    session_cwd = plan.session_cwd
     source_revision = plan.source_revision
     chunks_planned = plan.chunks_planned
     maximum = _configured_max_chunks(max_chunks_per_file)
@@ -451,6 +488,7 @@ def stream_codex(
             source_size=source_size,
             source_revision=source_revision,
             session_id=session_id,
+            session_cwd=session_cwd,
             chunks_planned=chunks_planned,
             drawers_upserted=0,
             stale_drawers_removed=0,
@@ -463,6 +501,7 @@ def stream_codex(
             source_size=source_size,
             source_revision=source_revision,
             session_id=session_id,
+            session_cwd=session_cwd,
             chunks_planned=chunks_planned,
             drawers_upserted=0,
             stale_drawers_removed=0,
@@ -480,6 +519,7 @@ def stream_codex(
                 source_size=source_size,
                 source_revision=existing.get("revision"),
                 session_id=existing.get("session_id"),
+                session_cwd=existing.get("session_cwd"),
                 chunks_planned=existing.get("chunks", 0),
                 drawers_upserted=0,
                 stale_drawers_removed=0,
@@ -496,6 +536,7 @@ def stream_codex(
             source_mtime=source_mtime,
             source_size=source_size,
             session_id=session_id,
+            session_cwd=session_cwd,
             wing=wing,
             agent=agent,
             chunks=iter_codex_chunks(
@@ -515,6 +556,7 @@ def stream_codex(
             "size": source_size,
             "mtime_ns": source_mtime_ns,
             "session_id": session_id,
+            "session_cwd": session_cwd,
             "chunks": chunks_planned,
         }
         _write_state(palace_path, state)
@@ -524,6 +566,7 @@ def stream_codex(
         source_size=source_size,
         source_revision=source_revision,
         session_id=session_id,
+        session_cwd=session_cwd,
         chunks_planned=chunks_planned,
         drawers_upserted=upserted,
         stale_drawers_removed=removed,
@@ -547,6 +590,7 @@ def _batch_entry_from_plan(plan: CodexSourcePlan, status: str) -> dict:
         "source_mtime": plan.source_mtime,
         "source_revision": plan.source_revision,
         "session_id": plan.session_id,
+        "session_cwd": plan.session_cwd,
         "chunks_planned": plan.chunks_planned,
         "status": status,
     }

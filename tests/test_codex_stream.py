@@ -109,6 +109,28 @@ def test_stream_rebuilds_changed_source_after_successful_new_revision(tmp_path, 
     }
 
 
+def test_stream_indexes_session_workspace_as_provenance_and_context(tmp_path, monkeypatch):
+    source = tmp_path / "session.jsonl"
+    palace = tmp_path / "palace"
+    write_codex(source)
+    collection = FakeCollection()
+    monkeypatch.setattr(codex_stream, "get_collection", lambda *args, **kwargs: collection)
+    monkeypatch.setattr(codex_stream, "mine_lock", no_lock)
+
+    result = codex_stream.stream_codex(str(source), str(palace))
+
+    assert result.session_cwd == "/repo/demo"
+    assert collection.rows
+    assert all(row["metadata"]["session_cwd"] == "/repo/demo" for row in collection.rows.values())
+    assert all(
+        row["document"].startswith("[Codex workspace: /repo/demo]\n")
+        for row in collection.rows.values()
+    )
+    state = json.loads((palace / ".mempalace" / "codex-stream-state.json").read_text())
+    assert state["version"] == codex_stream.STATE_VERSION
+    assert state["sources"][str(source.resolve())]["session_cwd"] == "/repo/demo"
+
+
 def test_stream_dry_run_and_chunk_cap_do_not_write_state_or_drawers(tmp_path, monkeypatch):
     source = tmp_path / "session.jsonl"
     palace = tmp_path / "palace"
@@ -184,6 +206,7 @@ def test_batch_preflight_and_execution_require_explicit_oversized_approval(tmp_p
     )
     assert report["summary"]["status_counts"]["ready"] == 1
     assert report["summary"]["status_counts"]["requires_oversized_approval"] == 1
+    assert report["entries"][0]["session_cwd"] == "/repo/demo"
     assert not collection.rows
 
     first = codex_stream.execute_codex_batch(

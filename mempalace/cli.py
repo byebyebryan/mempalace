@@ -723,6 +723,7 @@ def cmd_codex_stream(args):
         f"{prefix} {result.source_file}\n"
         f"    revision: {result.source_revision}\n"
         f"    session: {result.session_id}\n"
+        f"    workspace: {result.session_cwd or 'unknown'}\n"
         f"    chunks: {result.chunks_planned}\n"
         f"    upserted: {result.drawers_upserted}\n"
         f"    stale revisions removed: {result.stale_drawers_removed}"
