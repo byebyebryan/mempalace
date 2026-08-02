@@ -1344,6 +1344,23 @@ class TestNoneMetadataSafety:
 
 
 class TestSearchTool:
+    def test_search_uses_environment_candidate_strategy(self, monkeypatch, config, kg):
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace import mcp_server
+
+        captured = {}
+
+        def fake_search(*_args, **kwargs):
+            captured.update(kwargs)
+            return {"results": []}
+
+        monkeypatch.setenv("MEMPALACE_CANDIDATE_STRATEGY", "union")
+        monkeypatch.setattr(mcp_server, "search_memories", fake_search)
+
+        mcp_server.tool_search(query="workspace")
+
+        assert captured["candidate_strategy"] == "union"
+
     def test_search_basic(self, monkeypatch, config, palace_path, seeded_collection, kg):
         _patch_mcp_server(monkeypatch, config, kg)
         from mempalace.mcp_server import tool_search

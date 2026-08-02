@@ -2034,6 +2034,7 @@ def tool_search(
     max_distance: float = 1.5,
     min_similarity: float = None,
     context: str = None,
+    candidate_strategy: str = None,
 ):
     limit = max(1, min(limit, _MAX_RESULTS))
     try:
@@ -2046,6 +2047,12 @@ def tool_search(
     # Backwards compat: convert old similarity scale (higher=stricter) to
     # distance scale (lower=stricter). Similarity 0.8 → distance 0.2.
     dist = (1.0 - min_similarity) if min_similarity is not None else max_distance
+    # Archive deployments can opt into hybrid vector + lexical candidate
+    # gathering without changing the historical API default. A direct tool
+    # argument takes precedence over the process-level deployment setting.
+    strategy = (candidate_strategy or os.environ.get("MEMPALACE_CANDIDATE_STRATEGY", "vector")).lower()
+    if strategy not in {"vector", "union"}:
+        return {"error": "candidate_strategy must be 'vector' or 'union'"}
     # Mitigate system prompt contamination (Issue #333)
     sanitized = sanitize_query(query)
     # Ensure the vector-disabled probe has been run via the safe
@@ -2062,6 +2069,7 @@ def tool_search(
         n_results=limit,
         max_distance=dist,
         vector_disabled=_vector_disabled,
+        candidate_strategy=strategy,
         collection_name=_config.collection_name,
     )
     if _is_transient_index_error(result):
@@ -2080,6 +2088,7 @@ def tool_search(
             n_results=limit,
             max_distance=dist,
             vector_disabled=_vector_disabled,
+            candidate_strategy=strategy,
             collection_name=_config.collection_name,
         )
         if not _is_transient_index_error(result):
