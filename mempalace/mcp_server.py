@@ -2031,7 +2031,7 @@ def tool_search(
     wing: str = None,
     room: str = None,
     source_file: str = None,
-    max_distance: float = 1.5,
+    max_distance: float = None,
     min_similarity: float = None,
     context: str = None,
     candidate_strategy: str = None,
@@ -2043,16 +2043,23 @@ def tool_search(
         source_file = _sanitize_optional_source_file(source_file)
     except ValueError as e:
         return {"error": str(e)}
-    # Backwards compat: accept old name
-    # Backwards compat: convert old similarity scale (higher=stricter) to
-    # distance scale (lower=stricter). Similarity 0.8 → distance 0.2.
-    dist = (1.0 - min_similarity) if min_similarity is not None else max_distance
     # Archive deployments can opt into hybrid vector + lexical candidate
     # gathering without changing the historical API default. A direct tool
     # argument takes precedence over the process-level deployment setting.
     strategy = (candidate_strategy or os.environ.get("MEMPALACE_CANDIDATE_STRATEGY", "vector")).lower()
     if strategy not in {"vector", "union"}:
         return {"error": "candidate_strategy must be 'vector' or 'union'"}
+    # Backwards compat: accept old min_similarity (higher is stricter) and
+    # preserve the historical MCP vector threshold.  A lexical union cannot
+    # provide a vector distance for candidates that the vector index missed,
+    # so its unqualified default deliberately means "no distance filter".
+    # An explicit max_distance remains a strict filter in either mode.
+    if min_similarity is not None:
+        dist = 1.0 - min_similarity
+    elif max_distance is not None:
+        dist = max_distance
+    else:
+        dist = 0.0 if strategy == "union" else 1.5
     # Mitigate system prompt contamination (Issue #333)
     sanitized = sanitize_query(query)
     # Ensure the vector-disabled probe has been run via the safe
