@@ -155,6 +155,23 @@ def _source_path(source: str) -> Path:
     return path
 
 
+def _source_identifier(source_id: Optional[str], path: Path) -> str:
+    """Return the stable provenance key for one physical input file.
+
+    Path-only consumers sometimes receive a short-lived verified
+    materialization.  ``source_id`` lets those callers retain a durable,
+    logical source key for drawer IDs, state, and result provenance instead of
+    leaking the temporary pathname into the index.
+    """
+    if source_id is None:
+        return str(path)
+    if not isinstance(source_id, str) or not source_id or source_id.strip() != source_id:
+        raise ValueError("Codex stream source_id must be a non-empty trimmed string")
+    if "\0" in source_id:
+        raise ValueError("Codex stream source_id must not contain NUL bytes")
+    return source_id
+
+
 def _fingerprint(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -307,7 +324,13 @@ def iter_codex_chunks(
         )
 
 
-def preflight_codex(source: str, *, chunk_size: int = 800, min_chunk_size: int = 30) -> CodexSourcePlan:
+def preflight_codex(
+    source: str,
+    *,
+    source_id: Optional[str] = None,
+    chunk_size: int = 800,
+    min_chunk_size: int = 30,
+) -> CodexSourcePlan:
     """Read and verify one transcript without writing drawers or state.
 
     The returned plan is valid only while the recorded size and mtime remain
@@ -316,7 +339,7 @@ def preflight_codex(source: str, *, chunk_size: int = 800, min_chunk_size: int =
     completed import accidentally.
     """
     path = _source_path(source)
-    source_file = str(path)
+    source_file = _source_identifier(source_id, path)
     source_size, source_mtime_ns, source_mtime = _source_stat(path)
     session_id, session_cwd = _session_metadata(path)
     if session_id is None:
@@ -442,6 +465,7 @@ def stream_codex(
     source: str,
     palace_path: str,
     *,
+    source_id: Optional[str] = None,
     wing: str = "codex_stream",
     agent: str = "mempalace",
     dry_run: bool = False,
@@ -451,7 +475,7 @@ def stream_codex(
 ) -> StreamResult:
     """Import one Codex JSONL transcript without whole-file buffering."""
     path = _source_path(source)
-    source_file = str(path)
+    source_file = _source_identifier(source_id, path)
     source_size, source_mtime_ns, source_mtime = _source_stat(path)
     state = _load_state(palace_path)
     existing = state["sources"].get(source_file)
@@ -470,7 +494,8 @@ def stream_codex(
         )
 
     plan = preflight_codex(
-        source_file,
+        source,
+        source_id=source_id,
         chunk_size=chunk_size,
         min_chunk_size=min_chunk_size,
     )

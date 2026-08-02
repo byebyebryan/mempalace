@@ -699,6 +699,7 @@ def cmd_codex_stream(args):
     result = stream_codex(
         args.source,
         palace_path,
+        source_id=args.source_id,
         wing=args.wing,
         agent=args.agent,
         dry_run=args.dry_run,
@@ -1988,6 +1989,14 @@ def main():
         help="Stream one Codex JSONL session without whole-file buffering",
     )
     p_codex_stream.add_argument("source", help="One Codex JSONL transcript file")
+    p_codex_stream.add_argument(
+        "--source-id",
+        default=None,
+        help=(
+            "Stable logical provenance key for this source; defaults to the "
+            "resolved input path"
+        ),
+    )
     p_codex_stream.add_argument(
         "--backend",
         default=None,

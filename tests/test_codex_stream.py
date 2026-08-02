@@ -131,6 +131,24 @@ def test_stream_indexes_session_workspace_as_provenance_and_context(tmp_path, mo
     assert state["sources"][str(source.resolve())]["session_cwd"] == "/repo/demo"
 
 
+def test_stream_uses_logical_source_id_for_stable_provenance(tmp_path, monkeypatch):
+    source = tmp_path / "materialized.jsonl"
+    palace = tmp_path / "palace"
+    source_id = "bookkeeper://record/018f2caa-8fa7-7a65-b9d9-9f4a6a9e2818"
+    write_codex(source)
+    collection = FakeCollection()
+    monkeypatch.setattr(codex_stream, "get_collection", lambda *args, **kwargs: collection)
+    monkeypatch.setattr(codex_stream, "mine_lock", no_lock)
+
+    result = codex_stream.stream_codex(str(source), str(palace), source_id=source_id)
+
+    assert result.source_file == source_id
+    assert all(row["metadata"]["source_file"] == source_id for row in collection.rows.values())
+    state = json.loads((palace / ".mempalace" / "codex-stream-state.json").read_text())
+    assert source_id in state["sources"]
+    assert str(source.resolve()) not in state["sources"]
+
+
 def test_stream_dry_run_and_chunk_cap_do_not_write_state_or_drawers(tmp_path, monkeypatch):
     source = tmp_path / "session.jsonl"
     palace = tmp_path / "palace"
